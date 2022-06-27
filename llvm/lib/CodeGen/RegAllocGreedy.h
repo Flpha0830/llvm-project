@@ -152,6 +152,8 @@ public:
   size_t getQueueSize() const { return Queue.size(); }
   // end (interface to eviction advisers)
 
+  bool doFinalization(Module &M) override;
+
 private:
   // Convenient shortcuts.
   using PQueue = std::priority_queue<std::pair<unsigned, unsigned>>;
@@ -187,23 +189,9 @@ private:
   std::unique_ptr<RegAllocEvictionAdvisor> EvictAdvisor;
 
   std::unique_ptr<MLModelRunner> Evaluator;
-  // std::unique_ptr<Logger> Log;
   Logger *Log = nullptr;
   StringMap<std::unique_ptr<Logger>> LogMap;
-  std::string LogPath;
-
-  bool doFinalization(Module &M) override {
-    if (LogPath.empty())
-      return false;
-    std::error_code EC;
-    auto OS = std::make_unique<raw_fd_ostream>(LogPath, EC);
-    if (EC) {
-      M.getContext().emitError(EC.message() + ":" + LogPath);
-      return false;
-    }
-    Logger::flushLogs(*OS, LogMap);
-    return false;
-  }
+  std::vector<TensorSpec> FeatureList;
 
   // Enum CutOffStage to keep a track whether the register allocation failed
   // because of the cutoffs encountered in last chance recoloring.

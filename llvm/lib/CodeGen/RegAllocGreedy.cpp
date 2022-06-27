@@ -17,7 +17,6 @@
 #include "LiveDebugVariables.h"
 #include "RegAllocBase.h"
 #include "RegAllocEvictionAdvisor.h"
-#include "SimpleAnalysis.h"
 #include "SpillPlacement.h"
 #include "SplitKit.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -136,15 +135,28 @@ static cl::opt<bool> GreedyRegClassPriorityTrumpsGlobalness(
              "more important then whether the range is global"),
     cl::Hidden);
 
-static cl::opt<std::string> TrainingLog(
+static cl::opt<std::string> PriorityTrainingLog(
     "regalloc-prio-training-log", cl::Hidden,
-    cl::desc("Training log for the register allocator eviction model"));
+    cl::desc("Training log for the register allocator priority model"));
 
 static RegisterRegAlloc greedyRegAlloc("greedy", "greedy register allocator",
                                        createGreedyRegisterAllocator);
 
 char RAGreedy::ID = 0;
 char &llvm::RAGreedyID = RAGreedy::ID;
+
+bool llvm::RAGreedy::doFinalization(Module &M) {
+  if (PriorityTrainingLog.empty())
+    return false;
+  std::error_code EC;
+  auto OS = std::make_unique<raw_fd_ostream>(PriorityTrainingLog, EC);
+  if (EC) {
+    M.getContext().emitError(EC.message() + ":" + PriorityTrainingLog);
+    return false;
+  }
+  Logger::flushLogs(*OS, LogMap);
+  return false;
+}
 
 INITIALIZE_PASS_BEGIN(RAGreedy, "greedy",
                 "Greedy Register Allocator", false, false)
@@ -162,7 +174,6 @@ INITIALIZE_PASS_DEPENDENCY(EdgeBundles)
 INITIALIZE_PASS_DEPENDENCY(SpillPlacement)
 INITIALIZE_PASS_DEPENDENCY(MachineOptimizationRemarkEmitterPass)
 INITIALIZE_PASS_DEPENDENCY(RegAllocEvictionAdvisorAnalysis)
-INITIALIZE_PASS_DEPENDENCY(SimpleAnalysis)
 INITIALIZE_PASS_END(RAGreedy, "greedy",
                 "Greedy Register Allocator", false, false)
 
@@ -230,7 +241,6 @@ void RAGreedy::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<SpillPlacement>();
   AU.addRequired<MachineOptimizationRemarkEmitterPass>();
   AU.addRequired<RegAllocEvictionAdvisorAnalysis>();
-  AU.addRequired<SimpleAnalysis>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -300,11 +310,8 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
 
   *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
   *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
-  printf("\nsize: %u",  Size);
-  printf("\nstage: %d", Stage);
    
-  for (auto I = 0; I < 2; ++I) {
-    printf("\n%s", reinterpret_cast<const char*>(Evaluator->getTensorUntyped(I)));
+  for (size_t I = 0; I < FeatureList.size(); ++I) {
 	  Log->logSpecifiedTensorValue(I, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(I)));
   }
   Log->logInt32Reward(1);
@@ -2707,16 +2714,13 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   if (VerifyEnabled)
     MF->verify(this, "Before greedy register allocator");
 
-  // getAnalysis<SimpleAnalysis>().printmf(*MF);
-
-  std::vector<TensorSpec> FeatureList {
+  FeatureList = {
     TensorSpec::createSpec<int64_t>("size", {1}), 
     TensorSpec::createSpec<int64_t>("stage", {1})
   };
 
   LLVMContext &Ctx = mf.getFunction().getContext();
   Evaluator = std::make_unique<NoInferenceModelRunner>(Ctx, FeatureList);
-  LogPath = TrainingLog;
   
   std::vector<LoggedFeatureSpec> LFS;
   for (const auto &FS: FeatureList)
