@@ -17,6 +17,7 @@
 #include "LiveDebugVariables.h"
 #include "RegAllocBase.h"
 #include "RegAllocEvictionAdvisor.h"
+#include "RegAllocScore.h"
 #include "SpillPlacement.h"
 #include "SplitKit.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -310,11 +311,11 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
 
   *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
   *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
+  *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
    
   for (size_t I = 0; I < FeatureList.size(); ++I) {
 	  Log->logSpecifiedTensorValue(I, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(I)));
   }
-  Log->logInt32Reward(1);
 
   if (Stage == RS_New) {
     Stage = RS_Assign;
@@ -2716,7 +2717,8 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
 
   FeatureList = {
     TensorSpec::createSpec<int64_t>("size", {1}), 
-    TensorSpec::createSpec<int64_t>("stage", {1})
+    TensorSpec::createSpec<int64_t>("stage", {1}),
+    TensorSpec::createSpec<float>("weight", {1})
   };
 
   LLVMContext &Ctx = mf.getFunction().getContext();
@@ -2782,6 +2784,12 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
     MF->verify(this, "Before post optimization");
   postOptimization();
   reportStats();
+
+  Log->logFloatFinalReward(static_cast<float>(
+      calculateRegAllocScore(
+          mf, getAnalysis<MachineBlockFrequencyInfo>(),
+          getAnalysis<AAResultsWrapperPass>().getAAResults())
+          .getScore()));
 
   releaseMemory();
   return true;
