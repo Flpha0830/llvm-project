@@ -34,6 +34,9 @@
 #include "llvm/CodeGen/RegisterClassInfo.h"
 #include "llvm/CodeGen/Spiller.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/Analysis/TensorSpec.h"
+#include "llvm/Analysis/NoInferenceModelRunner.h"
+#include "llvm/Analysis/Utils/TFUtils.h"
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -149,6 +152,8 @@ public:
   size_t getQueueSize() const { return Queue.size(); }
   // end (interface to eviction advisers)
 
+  bool doFinalization(Module &M) override;
+
 private:
   // Convenient shortcuts.
   using PQueue = std::priority_queue<std::pair<unsigned, unsigned>>;
@@ -182,6 +187,11 @@ private:
   std::unique_ptr<VirtRegAuxInfo> VRAI;
   Optional<ExtraRegInfo> ExtraInfo;
   std::unique_ptr<RegAllocEvictionAdvisor> EvictAdvisor;
+
+  std::unique_ptr<MLModelRunner> Evaluator;
+  Logger *Log = nullptr;
+  StringMap<std::unique_ptr<Logger>> LogMap;
+  std::vector<TensorSpec> FeatureList;
 
   // Enum CutOffStage to keep a track whether the register allocation failed
   // because of the cutoffs encountered in last chance recoloring.

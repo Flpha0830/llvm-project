@@ -17,6 +17,7 @@
 #include "LiveDebugVariables.h"
 #include "RegAllocBase.h"
 #include "RegAllocEvictionAdvisor.h"
+#include "RegAllocScore.h"
 #include "SpillPlacement.h"
 #include "SplitKit.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -135,11 +136,28 @@ static cl::opt<bool> GreedyRegClassPriorityTrumpsGlobalness(
              "more important then whether the range is global"),
     cl::Hidden);
 
+static cl::opt<std::string> PriorityTrainingLog(
+    "regalloc-prio-training-log", cl::Hidden,
+    cl::desc("Training log for the register allocator priority model"));
+
 static RegisterRegAlloc greedyRegAlloc("greedy", "greedy register allocator",
                                        createGreedyRegisterAllocator);
 
 char RAGreedy::ID = 0;
 char &llvm::RAGreedyID = RAGreedy::ID;
+
+bool llvm::RAGreedy::doFinalization(Module &M) {
+  if (PriorityTrainingLog.empty())
+    return false;
+  std::error_code EC;
+  auto OS = std::make_unique<raw_fd_ostream>(PriorityTrainingLog, EC);
+  if (EC) {
+    M.getContext().emitError(EC.message() + ":" + PriorityTrainingLog);
+    return false;
+  }
+  Logger::flushLogs(*OS, LogMap);
+  return false;
+}
 
 INITIALIZE_PASS_BEGIN(RAGreedy, "greedy",
                 "Greedy Register Allocator", false, false)
@@ -290,6 +308,15 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   unsigned Prio;
 
   auto Stage = ExtraInfo->getOrInitStage(Reg);
+
+  *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
+  *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
+  *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
+   
+  for (size_t I = 0; I < FeatureList.size(); ++I) {
+	  Log->logSpecifiedTensorValue(I, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(I)));
+  }
+
   if (Stage == RS_New) {
     Stage = RS_Assign;
     ExtraInfo->setStage(Reg, Stage);
@@ -2688,6 +2715,28 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   if (VerifyEnabled)
     MF->verify(this, "Before greedy register allocator");
 
+  FeatureList = {
+    TensorSpec::createSpec<int64_t>("size", {1}), 
+    TensorSpec::createSpec<int64_t>("stage", {1}),
+    TensorSpec::createSpec<float>("weight", {1})
+  };
+
+  LLVMContext &Ctx = mf.getFunction().getContext();
+  Evaluator = std::make_unique<NoInferenceModelRunner>(Ctx, FeatureList);
+  
+  std::vector<LoggedFeatureSpec> LFS;
+  for (const auto &FS: FeatureList)
+    LFS.push_back({FS, None});
+
+  TensorSpec Reward = TensorSpec::createSpec<float>("reward", {1});
+
+  auto I = LogMap.insert(std::make_pair(
+    mf.getFunction().getName(),
+    std::make_unique<Logger>(LFS, Reward, true)));
+  
+  assert(I.second);
+  Log = I.first->second.get();
+
   RegAllocBase::init(getAnalysis<VirtRegMap>(),
                      getAnalysis<LiveIntervals>(),
                      getAnalysis<LiveRegMatrix>());
@@ -2735,6 +2784,12 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
     MF->verify(this, "Before post optimization");
   postOptimization();
   reportStats();
+
+  Log->logFloatFinalReward(static_cast<float>(
+      calculateRegAllocScore(
+          mf, getAnalysis<MachineBlockFrequencyInfo>(),
+          getAnalysis<AAResultsWrapperPass>().getAAResults())
+          .getScore()));
 
   releaseMemory();
   return true;
