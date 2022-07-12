@@ -31,6 +31,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ModelUnderTrainingRunner.h"
 #include "llvm/CodeGen/CalcSpillWeights.h"
 #include "llvm/CodeGen/EdgeBundles.h"
 #include "llvm/CodeGen/LiveInterval.h"
@@ -139,6 +140,10 @@ static cl::opt<bool> GreedyRegClassPriorityTrumpsGlobalness(
 static cl::opt<std::string> PriorityTrainingLog(
     "regalloc-prio-training-log", cl::Hidden,
     cl::desc("Training log for the register allocator priority model"));
+
+static cl::opt<std::string> ModelUnderTraining(
+     "regalloc-prio-model", cl::Hidden,
+     cl::desc("The model being trained for register allocation priority"));
 
 static RegisterRegAlloc greedyRegAlloc("greedy", "greedy register allocator",
                                        createGreedyRegisterAllocator);
@@ -308,15 +313,6 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   unsigned Prio;
 
   auto Stage = ExtraInfo->getOrInitStage(Reg);
-
-  *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
-  *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
-  *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
-   
-  for (size_t I = 0; I < FeatureList.size(); ++I) {
-	  Log->logSpecifiedTensorValue(I, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(I)));
-  }
-
   if (Stage == RS_New) {
     Stage = RS_Assign;
     ExtraInfo->setStage(Reg, Stage);
@@ -374,6 +370,26 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
     if (VRM->hasKnownPreference(Reg))
       Prio |= (1u << 30);
   }
+
+  *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
+  *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
+  *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
+
+  size_t CurrentFeature = 0;
+  for (; CurrentFeature < FeatureList.size(); ++CurrentFeature) {
+  Log->logSpecifiedTensorValue(CurrentFeature, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(CurrentFeature)));
+  }
+
+  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get()))
+    for (size_t I = 1; I < MUTR->outputLoggedFeatureSpecs().size();
+        ++I, ++CurrentFeature)
+      Log->logSpecifiedTensorValue(
+          CurrentFeature,
+          reinterpret_cast<const char *>(
+              MUTR->lastEvaluationResult()->getUntypedTensorValue(I)));
+  int64_t Ret = 0;
+  Log->logInt64Value(CurrentFeature, &Ret);
+
   // The virtual register number is a tie breaker for same-sized ranges.
   // Give lower vreg numbers higher priority to assign them first.
   CurQueue.push(std::make_pair(Prio, ~Reg));
@@ -2721,14 +2737,30 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
     TensorSpec::createSpec<float>("weight", {1})
   };
 
+  static const std::vector<TensorSpec> TrainingInputFeatures{};
+
   LLVMContext &Ctx = mf.getFunction().getContext();
-  Evaluator = std::make_unique<NoInferenceModelRunner>(Ctx, FeatureList);
+  if (!Evaluator) {
+    if (ModelUnderTraining.empty())
+      Evaluator = std::make_unique<NoInferenceModelRunner>(Ctx, FeatureList);
+    else
+      Evaluator = ModelUnderTrainingRunner::createAndEnsureValid(
+          Ctx, ModelUnderTraining, "priority", TrainingInputFeatures);
+  }
   
   std::vector<LoggedFeatureSpec> LFS;
   for (const auto &FS: FeatureList)
     LFS.push_back({FS, None});
 
   TensorSpec Reward = TensorSpec::createSpec<float>("reward", {1});
+  static const TensorSpec Output =
+    TensorSpec::createSpec<int64_t>("priority", {1});
+
+  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get()))
+    if (MUTR->outputLoggedFeatureSpecs().size() > 1)
+      append_range(LFS, drop_begin(MUTR->outputLoggedFeatureSpecs()));
+
+  LFS.push_back({Output, None});
 
   auto I = LogMap.insert(std::make_pair(
     mf.getFunction().getName(),
