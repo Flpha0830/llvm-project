@@ -387,8 +387,8 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
           CurrentFeature,
           reinterpret_cast<const char *>(
               MUTR->lastEvaluationResult()->getUntypedTensorValue(I)));
-  int64_t Ret = 0;
-  Log->logInt64Value(CurrentFeature, &Ret);
+  float Ret = static_cast<float>(Prio);
+  Log->logFloatValue(CurrentFeature, &Ret);
 
   // The virtual register number is a tie breaker for same-sized ranges.
   // Give lower vreg numbers higher priority to assign them first.
@@ -2737,7 +2737,14 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
     TensorSpec::createSpec<float>("weight", {1})
   };
 
-  static const std::vector<TensorSpec> TrainingInputFeatures{};
+  static const std::vector<TensorSpec> TrainingInputFeatures{
+    TensorSpec::createSpec<int64_t>("action_size", {1}), 
+    TensorSpec::createSpec<int64_t>("action_stage", {1}),
+    TensorSpec::createSpec<float>("action_weight", {1}),
+    TensorSpec::createSpec<float>("action_discount", {1}),
+    TensorSpec::createSpec<int32_t>("action_step_type", {1}),
+    TensorSpec::createSpec<float>("action_reward", {1})
+  };
 
   LLVMContext &Ctx = mf.getFunction().getContext();
   if (!Evaluator) {
@@ -2754,7 +2761,7 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
 
   TensorSpec Reward = TensorSpec::createSpec<float>("reward", {1});
   static const TensorSpec Output =
-    TensorSpec::createSpec<int64_t>("priority", {1});
+    TensorSpec::createSpec<float>("priority", {1});
 
   if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get()))
     if (MUTR->outputLoggedFeatureSpecs().size() > 1)
