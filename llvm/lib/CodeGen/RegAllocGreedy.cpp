@@ -374,6 +374,7 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
   *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
   *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
+  float Ret = Evaluator->evaluate<float>();
 
   size_t CurrentFeature = 0;
   for (; CurrentFeature < FeatureList.size(); ++CurrentFeature) {
@@ -387,7 +388,7 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
           CurrentFeature,
           reinterpret_cast<const char *>(
               MUTR->lastEvaluationResult()->getUntypedTensorValue(I)));
-  float Ret = static_cast<float>(Prio);
+  Ret = static_cast<float>(Prio);
   Log->logFloatValue(CurrentFeature, &Ret);
 
   // The virtual register number is a tie breaker for same-sized ranges.
