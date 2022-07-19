@@ -374,26 +374,27 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
   *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
   *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
   *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
-  float Ret = Evaluator->evaluate<float>();
+  float Ret = static_cast<float>(Prio);
 
   size_t CurrentFeature = 0;
   for (; CurrentFeature < FeatureList.size(); ++CurrentFeature) {
   Log->logSpecifiedTensorValue(CurrentFeature, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(CurrentFeature)));
   }
 
-  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get()))
+  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get())) {
+    Ret = Evaluator->evaluate<float>();
     for (size_t I = 1; I < MUTR->outputLoggedFeatureSpecs().size();
         ++I, ++CurrentFeature)
       Log->logSpecifiedTensorValue(
           CurrentFeature,
           reinterpret_cast<const char *>(
               MUTR->lastEvaluationResult()->getUntypedTensorValue(I)));
-  Ret = static_cast<float>(Prio);
+  }
   Log->logFloatValue(CurrentFeature, &Ret);
 
   // The virtual register number is a tie breaker for same-sized ranges.
   // Give lower vreg numbers higher priority to assign them first.
-  CurQueue.push(std::make_pair(Prio, ~Reg));
+  CurQueue.push(std::make_pair(Ret, ~Reg));
 }
 
 const LiveInterval *RAGreedy::dequeue() { return dequeue(Queue); }
