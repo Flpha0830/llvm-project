@@ -137,32 +137,11 @@ static cl::opt<bool> GreedyRegClassPriorityTrumpsGlobalness(
              "more important then whether the range is global"),
     cl::Hidden);
 
-static cl::opt<std::string> PriorityTrainingLog(
-    "regalloc-prio-training-log", cl::Hidden,
-    cl::desc("Training log for the register allocator priority model"));
-
-static cl::opt<std::string> ModelUnderTraining(
-     "regalloc-prio-model", cl::Hidden,
-     cl::desc("The model being trained for register allocation priority"));
-
 static RegisterRegAlloc greedyRegAlloc("greedy", "greedy register allocator",
                                        createGreedyRegisterAllocator);
 
 char RAGreedy::ID = 0;
 char &llvm::RAGreedyID = RAGreedy::ID;
-
-bool llvm::RAGreedy::doFinalization(Module &M) {
-  if (PriorityTrainingLog.empty())
-    return false;
-  std::error_code EC;
-  auto OS = std::make_unique<raw_fd_ostream>(PriorityTrainingLog, EC);
-  if (EC) {
-    M.getContext().emitError(EC.message() + ":" + PriorityTrainingLog);
-    return false;
-  }
-  Logger::flushLogs(*OS, LogMap);
-  return false;
-}
 
 INITIALIZE_PASS_BEGIN(RAGreedy, "greedy",
                 "Greedy Register Allocator", false, false)
@@ -180,6 +159,7 @@ INITIALIZE_PASS_DEPENDENCY(EdgeBundles)
 INITIALIZE_PASS_DEPENDENCY(SpillPlacement)
 INITIALIZE_PASS_DEPENDENCY(MachineOptimizationRemarkEmitterPass)
 INITIALIZE_PASS_DEPENDENCY(RegAllocEvictionAdvisorAnalysis)
+INITIALIZE_PASS_DEPENDENCY(RegAllocPriorityAdvisorAnalysis)
 INITIALIZE_PASS_END(RAGreedy, "greedy",
                 "Greedy Register Allocator", false, false)
 
@@ -247,6 +227,7 @@ void RAGreedy::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<SpillPlacement>();
   AU.addRequired<MachineOptimizationRemarkEmitterPass>();
   AU.addRequired<RegAllocEvictionAdvisorAnalysis>();
+  AU.addRequired<RegAllocPriorityAdvisorAnalysis>();
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -371,26 +352,7 @@ void RAGreedy::enqueue(PQueue &CurQueue, const LiveInterval *LI) {
       Prio |= (1u << 30);
   }
 
-  *Evaluator->getTensor<int64_t>(0) = static_cast<int64_t>(Size);
-  *Evaluator->getTensor<int64_t>(1) = static_cast<int64_t>(Stage);
-  *Evaluator->getTensor<float>(2) = static_cast<float>(LI->weight());
-  float Ret = static_cast<float>(Prio);
-
-  size_t CurrentFeature = 0;
-  for (; CurrentFeature < FeatureList.size(); ++CurrentFeature) {
-  Log->logSpecifiedTensorValue(CurrentFeature, reinterpret_cast<const char*>(Evaluator->getTensorUntyped(CurrentFeature)));
-  }
-
-  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get())) {
-    Ret = Evaluator->evaluate<float>();
-    for (size_t I = 1; I < MUTR->outputLoggedFeatureSpecs().size();
-        ++I, ++CurrentFeature)
-      Log->logSpecifiedTensorValue(
-          CurrentFeature,
-          reinterpret_cast<const char *>(
-              MUTR->lastEvaluationResult()->getUntypedTensorValue(I)));
-  }
-  Log->logFloatValue(CurrentFeature, &Ret);
+  float Ret = PriorityAdvisor->tryFindPriority(Prio, Size, Stage, LI->weight());
 
   // The virtual register number is a tie breaker for same-sized ranges.
   // Give lower vreg numbers higher priority to assign them first.
@@ -2733,50 +2695,8 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   if (VerifyEnabled)
     MF->verify(this, "Before greedy register allocator");
 
-  FeatureList = {
-    TensorSpec::createSpec<int64_t>("size", {1}), 
-    TensorSpec::createSpec<int64_t>("stage", {1}),
-    TensorSpec::createSpec<float>("weight", {1})
-  };
-
-  static const std::vector<TensorSpec> TrainingInputFeatures{
-    TensorSpec::createSpec<int64_t>("action_size", {1}), 
-    TensorSpec::createSpec<int64_t>("action_stage", {1}),
-    TensorSpec::createSpec<float>("action_weight", {1}),
-    TensorSpec::createSpec<float>("action_discount", {1}),
-    TensorSpec::createSpec<int32_t>("action_step_type", {1}),
-    TensorSpec::createSpec<float>("action_reward", {1})
-  };
-
-  LLVMContext &Ctx = mf.getFunction().getContext();
-  if (!Evaluator) {
-    if (ModelUnderTraining.empty())
-      Evaluator = std::make_unique<NoInferenceModelRunner>(Ctx, FeatureList);
-    else
-      Evaluator = ModelUnderTrainingRunner::createAndEnsureValid(
-          Ctx, ModelUnderTraining, "priority", TrainingInputFeatures);
-  }
-  
-  std::vector<LoggedFeatureSpec> LFS;
-  for (const auto &FS: FeatureList)
-    LFS.push_back({FS, None});
-
-  TensorSpec Reward = TensorSpec::createSpec<float>("reward", {1});
-  static const TensorSpec Output =
-    TensorSpec::createSpec<float>("priority", {1});
-
-  if (auto *MUTR = dyn_cast<ModelUnderTrainingRunner>(Evaluator.get()))
-    if (MUTR->outputLoggedFeatureSpecs().size() > 1)
-      append_range(LFS, drop_begin(MUTR->outputLoggedFeatureSpecs()));
-
-  LFS.push_back({Output, None});
-
-  auto I = LogMap.insert(std::make_pair(
-    mf.getFunction().getName(),
-    std::make_unique<Logger>(LFS, Reward, true)));
-  
-  assert(I.second);
-  Log = I.first->second.get();
+  PriorityAdvisor = 
+    getAnalysis<RegAllocPriorityAdvisorAnalysis>().getAdvisor(*MF, *this);
 
   RegAllocBase::init(getAnalysis<VirtRegMap>(),
                      getAnalysis<LiveIntervals>(),
@@ -2826,11 +2746,11 @@ bool RAGreedy::runOnMachineFunction(MachineFunction &mf) {
   postOptimization();
   reportStats();
 
-  Log->logFloatFinalReward(static_cast<float>(
-      calculateRegAllocScore(
-          mf, getAnalysis<MachineBlockFrequencyInfo>(),
-          getAnalysis<AAResultsWrapperPass>().getAAResults())
-          .getScore()));
+  PriorityAdvisor->logReward(static_cast<float>(
+          calculateRegAllocScore(
+              mf, getAnalysis<MachineBlockFrequencyInfo>(),
+              getAnalysis<AAResultsWrapperPass>().getAAResults())
+              .getScore()));
 
   releaseMemory();
   return true;
