@@ -24,7 +24,7 @@ POLICY_OUTPUT_SPEC = """
 ]
 """
 PER_LIVEINTERVAL_INT64_FEATURE_LIST = [
-    'size', 'stage'
+    'li_size', 'stage'
 ]
 PER_LIVEINTERVAL_FLOAT32_FEATURE_LIST = ['weight'
 ]

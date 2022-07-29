@@ -40,7 +40,7 @@ namespace llvm {
 static const std::vector<int64_t> PerLiveRangeShape{1};
 
 #define RA_PRIORITY_FEATURES_LIST(M)                                              \
-  M(int64_t, size, PerLiveRangeShape, "size")                                         \
+  M(int64_t, li_size, PerLiveRangeShape, "size")                                         \
   M(int64_t, stage, PerLiveRangeShape, "stage")                        \
   M(float, weight, PerLiveRangeShape, "weight")                               \
 
