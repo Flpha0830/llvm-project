@@ -1,0 +1,27 @@
+; REQUIRES: have_tf_api
+
+;
+; Check that we log correctly, both with a learned policy, and the default policy
+;
+; RUN: llc -regalloc=greedy -regalloc-prio-enable-advisor=development \
+; RUN:   -regalloc-prio-training-log=%t1 -tfutils-text-log < %S/Inputs/input.ll
+; RUN: sed -i '' 's/ \+/ /g' %t1
+; RUN: sed -i '' 's/\\n key:/\n key:/g' %t1
+; RUN: sed -i '' 's/\\n feature/\n feature/g' %t1
+; RUN: sed -i '' 's/\\n/ /g' %t1
+; RUN: FileCheck --input-file %t1 %s --check-prefixes=CHECK
+; RUN: diff %t1 %S/Inputs/reference-prio-log-noml.txt
+
+; RUN: rm -rf %t && mkdir %t
+; RUN: %python %S/../../../lib/Analysis/models/gen-regalloc-priority-test-model.py %t
+; RUN: llc -regalloc=greedy -regalloc-prio-enable-advisor=development \
+; RUN:   -regalloc-prio-training-log=%t2 -tfutils-text-log -regalloc-prio-model=%t < %S/Inputs/input.ll
+; RUN: sed -i '' 's/ \+/ /g' %t2
+; RUN: sed -i '' 's/\\n key:/\n key:/g' %t2
+; RUN: sed -i '' 's/\\n feature/\n feature/g' %t2
+; RUN: sed -i '' 's/\\n/ /g' %t2
+; RUN: FileCheck --input-file %t2 %s --check-prefixes=CHECK
+
+; CHECK-NOT: nan
+; CHECK-LABEL: key: \"priority\"
+; CHECK-LABEL: key: \"reward\"
